@@ -17,13 +17,40 @@ const state = {
 // Initialize extension
 chrome.runtime.onInstalled.addListener(async () => {
   console.log('AI Research Paper Helper installed');
-
-  // Load saved settings
-  const saved = await chrome.storage.local.get('settings');
-  if (saved.settings) {
-    Object.assign(state.settings, saved.settings);
-  }
+  await loadSavedState();
 });
+
+// Also restore state when service worker starts (not just on install)
+loadSavedState();
+
+async function loadSavedState() {
+  try {
+    const saved = await chrome.storage.local.get(['settings', 'currentPaper', 'isIndexed']);
+    if (saved.settings) {
+      Object.assign(state.settings, saved.settings);
+    }
+    if (saved.currentPaper) {
+      state.currentPaper = saved.currentPaper;
+      state.isIndexed = saved.isIndexed || false;
+      console.log('Restored paper state:', state.currentPaper?.url);
+    }
+  } catch (error) {
+    console.error('Failed to load saved state:', error);
+  }
+}
+
+async function saveCurrentPaper(paper, indexed) {
+  state.currentPaper = paper;
+  state.isIndexed = indexed;
+  try {
+    await chrome.storage.local.set({
+      currentPaper: paper,
+      isIndexed: indexed
+    });
+  } catch (error) {
+    console.error('Failed to save paper state:', error);
+  }
+}
 
 // Message handler for content script and popup communication
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -172,31 +199,48 @@ async function indexPaper(data) {
       content: data.content,
       paper_id: data.url  // Fixed: was paperId
     });
-    state.isIndexed = true;
-    state.currentPaper = data;  // Store for later queries
+    // Persist to storage so Q&A works after page reload
+    await saveCurrentPaper(data, true);
     return { success: true, data: result };
   } catch (error) {
-    state.isIndexed = false;
+    await saveCurrentPaper(data, false);
     return { success: false, error: error.message };
   }
 }
 
 async function ragQuery(data) {
   try {
-    // Don't check state.isIndexed - let the backend tell us if it's indexed
-    // This handles cases where extension reloaded but backend still has the index
     const paperId = data.paperId || state.currentPaper?.url;
 
     if (!paperId) {
       throw new Error('No paper URL available. Please analyze a page first.');
     }
 
-    const result = await apiRequest('/rag/query', {
-      query: data.query,
-      paper_id: paperId,  // Fixed: was paperId
-      top_k: data.topK || 5  // Fixed: was topK
-    });
-    return { success: true, data: result };
+    try {
+      const result = await apiRequest('/rag/query', {
+        query: data.query,
+        paper_id: paperId,
+        top_k: data.topK || 5
+      });
+      return { success: true, data: result };
+    } catch (queryError) {
+      // If paper not indexed on backend (e.g., server restarted), try to re-index
+      if (queryError.message.includes('404') && state.currentPaper) {
+        console.log('Paper not found on backend, re-indexing...');
+        const reindexResult = await indexPaper(state.currentPaper);
+
+        if (reindexResult.success) {
+          // Retry the query after re-indexing
+          const result = await apiRequest('/rag/query', {
+            query: data.query,
+            paper_id: paperId,
+            top_k: data.topK || 5
+          });
+          return { success: true, data: result };
+        }
+      }
+      throw queryError;
+    }
   } catch (error) {
     return { success: false, error: error.message };
   }
