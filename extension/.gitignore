@@ -1,0 +1,23 @@
+# Extension build artifacts
+*.crx
+*.pem
+*.zip
+
+# Node modules (if using build tools)
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.lnk
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
